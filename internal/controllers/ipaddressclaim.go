@@ -3,8 +3,11 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"net/netip"
 
+	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
+	"go4.org/netipx"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -157,10 +160,20 @@ func (r *IPAddressClaimReconciler) reconcile(ctx context.Context, claim *ipamv1.
 
 	log = log.WithValues(pool.GetObjectKind().GroupVersionKind().Kind, fmt.Sprintf("%s/%s", pool.GetNamespace(), pool.GetName()))
 
+	poolIPSet, err := poolutil.IPPoolSpecToIPSet(pool.PoolSpec())
+	if err != nil {
+		return ctrl.Result{}, errors.Wrap(err, "failed to convert pool to range")
+	}
+
+	inUseIPSet, err := inUseIPSet(addressesInUse, pool.PoolSpec().Gateway, poolIPSet)
+	if err != nil {
+		return ctrl.Result{}, errors.Wrap(err, "failed to convert IPAddressList to IPSet")
+	}
+
 	address := poolutil.AddressByName(addressesInUse, claim.Name)
 	if address == nil {
 		var err error
-		address, err = r.allocateAddress(claim, pool, addressesInUse)
+		address, err = r.allocateAddress(claim, pool, poolIPSet, inUseIPSet)
 		if err != nil {
 			return ctrl.Result{}, errors.Wrap(err, "failed to allocate address")
 		}
@@ -190,7 +203,36 @@ func (r *IPAddressClaimReconciler) reconcile(ctx context.Context, claim *ipamv1.
 
 	claim.Status.AddressRef = corev1.LocalObjectReference{Name: address.Name}
 
+	err = r.updatePoolStatus(ctx, pool, poolIPSet, inUseIPSet, log)
+	if err != nil {
+		return ctrl.Result{}, errors.Wrap(err, "failed to patch pool status")
+	}
+
 	return ctrl.Result{}, nil
+}
+
+func (r *IPAddressClaimReconciler) updatePoolStatus(ctx context.Context, pool pooltypes.GenericInClusterPool, poolIPSet *netipx.IPSet, inUseIPSet *netipx.IPSet, log logr.Logger) error {
+	poolCount := poolutil.IPSetCount(poolIPSet)
+	inUseCount := poolutil.IPSetCount(inUseIPSet)
+	freeCount := poolCount - inUseCount
+
+	patchHelper, err := patch.NewHelper(pool, r.Client)
+	if err != nil {
+		return err
+	}
+
+	status := pool.PoolStatus()
+	status.IPAddresses.Total = poolCount
+	status.IPAddresses.Used = inUseCount
+	status.IPAddresses.Free = freeCount
+
+	if err := patchHelper.Patch(ctx, pool); err != nil {
+		return errors.Wrap(err, "failed to patch pool")
+	}
+
+	log.Info("updated pool with usage info", "pool.Status.IPAddresses", pool.PoolStatus().IPAddresses)
+
+	return nil
 }
 
 func (r *IPAddressClaimReconciler) reconcileDelete(ctx context.Context, claim *ipamv1.IPAddressClaim, address *ipamv1.IPAddress) (ctrl.Result, error) {
@@ -213,18 +255,8 @@ func (r *IPAddressClaimReconciler) reconcileDelete(ctx context.Context, claim *i
 	return ctrl.Result{}, nil
 }
 
-func (r *IPAddressClaimReconciler) allocateAddress(claim *ipamv1.IPAddressClaim, pool pooltypes.GenericInClusterPool, addressesInUse []ipamv1.IPAddress) (*ipamv1.IPAddress, error) {
+func (r *IPAddressClaimReconciler) allocateAddress(claim *ipamv1.IPAddressClaim, pool pooltypes.GenericInClusterPool, poolIPSet *netipx.IPSet, inUseIPSet *netipx.IPSet) (*ipamv1.IPAddress, error) {
 	poolSpec := pool.PoolSpec()
-
-	inUseIPSet, err := poolutil.AddressesToIPSet(buildAddressList(addressesInUse, poolSpec.Gateway))
-	if err != nil {
-		return nil, fmt.Errorf("failed to convert IPAddressList to IPSet: %w", err)
-	}
-
-	poolIPSet, err := poolutil.IPPoolSpecToIPSet(pool.PoolSpec())
-	if err != nil {
-		return nil, fmt.Errorf("failed to convert pool to range: %w", err)
-	}
 
 	freeIP, err := poolutil.FindFreeAddress(poolIPSet, inUseIPSet)
 	if err != nil {
@@ -239,16 +271,27 @@ func (r *IPAddressClaimReconciler) allocateAddress(claim *ipamv1.IPAddressClaim,
 	return &address, nil
 }
 
-func buildAddressList(addressesInUse []ipamv1.IPAddress, gateway string) []string {
-	// Add extra capacity for the case that the pool's gateway is specified
-	addrStrings := make([]string, len(addressesInUse), len(addressesInUse)+1)
-	for i, address := range addressesInUse {
-		addrStrings[i] = address.Spec.Address
+func inUseIPSet(inUseIPAddresses []ipamv1.IPAddress, gatewayStr string, poolIPSet *netipx.IPSet) (*netipx.IPSet, error) {
+	builder := &netipx.IPSetBuilder{}
+
+	for _, inUseIPAddress := range inUseIPAddresses {
+		inUseAddr, err := netip.ParseAddr(inUseIPAddress.Spec.Address)
+		if err != nil {
+			return nil, err
+		}
+		builder.Add(inUseAddr)
 	}
 
-	if gateway != "" {
-		addrStrings = append(addrStrings, gateway)
+	if gatewayStr != "" {
+		gatewayAddr, err := netip.ParseAddr(gatewayStr)
+		if err != nil {
+			return nil, err
+		}
+
+		if poolIPSet.Contains(gatewayAddr) {
+			builder.Add(gatewayAddr)
+		}
 	}
 
-	return addrStrings
+	return builder.IPSet()
 }

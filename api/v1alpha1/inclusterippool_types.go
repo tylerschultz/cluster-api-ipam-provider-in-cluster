@@ -41,6 +41,27 @@ type InClusterIPPoolSpec struct {
 
 // InClusterIPPoolStatus defines the observed state of InClusterIPPool.
 type InClusterIPPoolStatus struct {
+	// IPAddresses reports the count of total, free, and used IPs in the pool
+	// +optional
+	IPAddresses InClusterIPPoolStatusIPAddresses `json:"ipAddresses,omitempty"`
+}
+
+// InClusterIPPoolStatusIPAddresses contains the count of total, free, and used IPs in a pool
+type InClusterIPPoolStatusIPAddresses struct {
+	// Total is the total number of IPs configured for the pool
+	// Counts greater than int can contain will report as math.MaxInt
+	// +optional
+	Total int `json:"total,omitempty"`
+
+	// Free is the count of unallocated IPs in the pool
+	// Counts greater than int can contain will report as math.MaxInt
+	// +optional
+	Free int `json:"free,omitempty"`
+
+	// Used is the count of allocated IPs in the pool
+	// Counts greater than int can contain will report as math.MaxInt
+	// +optional
+	Used int `json:"used,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -49,6 +70,9 @@ type InClusterIPPoolStatus struct {
 // +kubebuilder:printcolumn:name="First",type="string",JSONPath=".spec.first",description="First address of the range to allocate from"
 // +kubebuilder:printcolumn:name="Last",type="string",JSONPath=".spec.last",description="Last address of the range to allocate from"
 // +kubebuilder:printcolumn:name="Addresses",type="string",JSONPath=".spec.addresses",description="List of addresses, within the subnet, to allocate from"
+// +kubebuilder:printcolumn:name="Total",type="integer",JSONPath=".status.ipAddresses.total",description="Count of IPs configured for the pool"
+// +kubebuilder:printcolumn:name="Free",type="integer",JSONPath=".status.ipAddresses.free",description="Count of unallocated IPs in the pool"
+// +kubebuilder:printcolumn:name="Used",type="integer",JSONPath=".status.ipAddresses.used",description="Count of allocated IPs in the pool"
 
 // InClusterIPPool is the Schema for the inclusterippools API.
 type InClusterIPPool struct {
@@ -110,6 +134,16 @@ func (p *InClusterIPPool) PoolSpec() *InClusterIPPoolSpec {
 }
 
 // PoolSpec implements the genericInClusterPool interface.
+func (p *InClusterIPPool) PoolStatus() *InClusterIPPoolStatus {
+	return &p.Status
+}
+
+// PoolSpec implements the genericInClusterPool interface.
 func (p *GlobalInClusterIPPool) PoolSpec() *InClusterIPPoolSpec {
 	return &p.Spec
+}
+
+// PoolSpec implements the genericInClusterPool interface.
+func (p *GlobalInClusterIPPool) PoolStatus() *InClusterIPPoolStatus {
+	return &p.Status
 }
